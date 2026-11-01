@@ -4,6 +4,22 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import http from 'http';
 import { GoogleGenAI, Type } from '@google/genai';
+import crypto from 'crypto';
+
+// ===== BEZPIECZENSTWO: wspolny token (ustaw OMNISTAR_TOKEN w .env) =====
+const OMNI_TOKEN = (process.env.OMNISTAR_TOKEN || '').trim();
+if (OMNI_TOKEN.length < 24) {
+  console.error('[BEZPIECZENSTWO] Brak OMNISTAR_TOKEN (min. 24 znaki) - API i sterowanie PC sa ZABLOKOWANE.');
+}
+function tokenOk(given: unknown): boolean {
+  if (OMNI_TOKEN.length < 24 || typeof given !== 'string') return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(OMNI_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function tokenFromUrl(rawUrl: string | undefined): string {
+  try { return new URL(rawUrl || '/', 'http://x').searchParams.get('token') || ''; } catch { return ''; }
+}
 
 interface DesktopBridgeClient {
   ws: WebSocket;
@@ -15,9 +31,16 @@ interface DesktopBridgeClient {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: '10mb' }));
+  app.use('/api', (req, res, next) => {
+    const given = (req.headers['x-omnistar-token'] as string) || (req.query.token as string) || '';
+    if (!tokenOk(given)) {
+      return res.status(401).json({ error: 'Brak lub zly token OMNISTAR_TOKEN' });
+    }
+    next();
+  });
 
   // Connected reverse-WebSocket desktop agents (solves Cloud -> Local Windows control without localhost port-forwarding)
   const desktopAgents = new Map<string, DesktopBridgeClient>();
@@ -41,7 +64,10 @@ async function startServer() {
   ];
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server });
+  const wss = new WebSocketServer({
+    server,
+    verifyClient: (info: any) => tokenOk(tokenFromUrl(info.req.url))
+  });
 
   function broadcastToAll(payloadObj: any) {
     if (!wss) return;
@@ -164,6 +190,9 @@ async function startServer() {
           });
           return;
         }
+        if (payload && (payload.type === 'execute_desktop_action' || payload.type === 'desktop_agent_hello')) {
+          return; // nie przekazujemy rozkazow sterowania od innych klientow
+        }
       } catch {
         // Non-JSON relay
       }
@@ -212,9 +241,9 @@ async function startServer() {
         pendingDesktopRequests.delete(requestId);
         resolve({
           executedRemotely: false,
-          error: 'Przekroczono czas oczekiwania (8s) na odpowiedź z komputera Windows.'
+          error: 'Przekroczono czas oczekiwania (45s) - brak potwierdzenia na PC na odpowiedź z komputera Windows.'
         });
-      }, 8000);
+      }, 45000);
 
       pendingDesktopRequests.set(requestId, {
         resolve: (resPayload) => {
@@ -901,7 +930,7 @@ BEZWZGLĘDNE ZAKAZY (ŻELAZNE REGUŁY):
     const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
     const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
     const wsProto = proto.includes('https') ? 'wss' : 'ws';
-    const hubWsUrl = `${wsProto}://${host}`;
+    const hubWsUrl = `${wsProto}://${host}/?token=${encodeURIComponent(String(req.query.token || ''))}`;
 
     res.setHeader('Content-Disposition', 'attachment; filename="omnistar_desktop_agent.py"');
     res.setHeader('Content-Type', 'text/x-python; charset=utf-8');
@@ -949,6 +978,30 @@ except ImportError:
 HUB_WS_URL = "${hubWsUrl}"
 DEVICE_ID = socket.gethostname() or "Windows-PC"
 
+# ===== BEZPIECZENSTWO =====
+# Tylko te programy wolno otwierac (nazwa -> plik). Dopisz wlasne, jesli chcesz.
+DOZWOLONE_PROGRAMY = {
+    "notepad": "notepad.exe", "notatnik": "notepad.exe",
+    "calc": "calc.exe", "kalkulator": "calc.exe",
+    "mspaint": "mspaint.exe", "paint": "mspaint.exe",
+    "explorer": "explorer.exe",
+}
+PYTAJ_O_ZGODE = True  # okienko TAK/NIE przed kazda akcja
+
+
+def zgoda(opis):
+    if not PYTAJ_O_ZGODE:
+        return True
+    odp = pyautogui.confirm(text=f"Omnistar chce wykonac:\n\n{opis}\n\nPozwolic?",
+                            title="Omnistar - potwierdzenie", buttons=["TAK", "NIE"])
+    return odp == "TAK"
+
+
+def program_z_listy(nazwa):
+    n = str(nazwa or "").strip().lower()
+    n = n[:-4] if n.endswith(".exe") else n
+    return DOZWOLONE_PROGRAMY.get(n)
+
 
 def execute_local_command(payload):
     action = str(payload.get("action", "")).lower()
@@ -961,11 +1014,20 @@ def execute_local_command(payload):
     try:
         if action in ("open", "open_app"):
             app_name = payload.get("app") or "notepad.exe"
-            subprocess.Popen(app_name, shell=True)
-            return {"status": "success", "action": "open", "app": app_name, "message": f"Uruchomiono program: {app_name}"}
+            exe = program_z_listy(app_name)
+            if not exe:
+                return {"status": "error", "action": "open", "message": f"Zablokowano: '{app_name}' nie jest na bialej liscie"}
+            if not zgoda(f"Otworzyc program: {exe}"):
+                return {"status": "error", "action": "open", "message": "Odmowa uzytkownika"}
+            subprocess.Popen([exe])
+            return {"status": "success", "action": "open", "app": exe, "message": f"Uruchomiono program: {exe}"}
 
         elif action == "open_url":
-            url = payload.get("url") or "https://www.google.com"
+            url = str(payload.get("url") or "https://www.google.com")
+            if not re.match(r"^https?://", url, re.I):
+                return {"status": "error", "action": "open_url", "message": "Zablokowano: dozwolone tylko adresy http(s)"}
+            if not zgoda(f"Otworzyc strone: {url}"):
+                return {"status": "error", "action": "open_url", "message": "Odmowa uzytkownika"}
             webbrowser.open(url)
             return {"status": "success", "action": "open_url", "url": url, "message": f"Otwarto w przeglądarce: {url}"}
 
@@ -974,6 +1036,8 @@ def execute_local_command(payload):
             y = int(payload.get("y", screen_h // 2))
             x = max(5, min(screen_w - 5, x))
             y = max(5, min(screen_h - 5, y))
+            if not zgoda(f"{action} w punkcie ({x}, {y})"):
+                return {"status": "error", "action": action, "message": "Odmowa uzytkownika"}
             pyautogui.moveTo(x, y, duration=0.25)
             if action == "double_click":
                 pyautogui.doubleClick(x, y)
@@ -985,6 +1049,8 @@ def execute_local_command(payload):
 
         elif action in ("type", "type_text"):
             text = str(payload.get("text") or "")
+            if text and not zgoda(f"Wpisac tekst: {text[:200]}"):
+                return {"status": "error", "action": "type", "message": "Odmowa uzytkownika"}
             if text:
                 pyautogui.write(text, interval=0.02)
             return {"status": "success", "action": "type", "text": text, "message": f"Wpisano na klawiaturze: '{text}'"}
@@ -993,6 +1059,8 @@ def execute_local_command(payload):
             key = str(payload.get("key") or "enter").lower()
             key_map = {"return": "enter", "escape": "esc"}
             mapped = key_map.get(key, key)
+            if not zgoda(f"Nacisnac klawisz: {mapped}"):
+                return {"status": "error", "action": "press", "message": "Odmowa uzytkownika"}
             if "+" in mapped:
                 parts = [k.strip() for k in mapped.split("+")]
                 pyautogui.hotkey(*parts)
@@ -1014,13 +1082,13 @@ def execute_local_command(payload):
             # Inteligentne wnioskowanie z instrukcji tekstowej
             low = (instruction + " " + vlm_resp).lower()
             if "notatnik" in low or "notepad" in low:
-                subprocess.Popen("notepad.exe", shell=True)
+                subprocess.Popen(["notepad.exe"]) if zgoda("Otworzyc Notatnik") else None
                 return {"status": "success", "action": "open", "app": "notepad.exe", "message": "Otwarto Notatnik (notepad.exe)"}
             if "kalkulator" in low or "calc" in low:
-                subprocess.Popen("calc.exe", shell=True)
+                subprocess.Popen(["calc.exe"]) if zgoda("Otworzyc Kalkulator") else None
                 return {"status": "success", "action": "open", "app": "calc.exe", "message": "Otwarto Kalkulator (calc.exe)"}
             if "paint" in low:
-                subprocess.Popen("mspaint.exe", shell=True)
+                subprocess.Popen(["mspaint.exe"]) if zgoda("Otworzyc Paint") else None
                 return {"status": "success", "action": "open", "app": "mspaint.exe", "message": "Otwarto Paint (mspaint.exe)"}
             if "przeglądark" in low or "chrome" in low or "google" in low:
                 webbrowser.open("https://www.google.com")
@@ -1029,6 +1097,8 @@ def execute_local_command(payload):
             m = re.search(r"(\\d{2,4})\\s*[,\\s]\\s*(\\d{2,4})", low)
             if m:
                 x, y = int(m.group(1)), int(m.group(2))
+                if not zgoda(f"Kliknac w punkt ({x}, {y})"):
+                    return {"status": "error", "action": "click", "message": "Odmowa uzytkownika"}
                 pyautogui.moveTo(x, y, duration=0.25)
                 pyautogui.click(x, y)
                 return {"status": "success", "action": "click", "x": x, "y": y, "message": f"Kliknięto w punkt ({x}, {y})"}
@@ -1138,8 +1208,8 @@ except ImportError:
     print("Błąd: Moduł tkinter jest wymagany.")
     sys.exit(1)
 
-HUB_URL = "${baseHttpUrl}/api/council/board"
-DELIBERATE_URL = "${baseHttpUrl}/api/council/deliberate"
+HUB_URL = "${baseHttpUrl}/api/council/board?token=${encodeURIComponent(String(req.query.token || ''))}"
+DELIBERATE_URL = "${baseHttpUrl}/api/council/deliberate?token=${encodeURIComponent(String(req.query.token || ''))}"
 
 class CouncilHUD(tk.Tk):
     def __init__(self):

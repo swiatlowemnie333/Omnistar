@@ -140,7 +140,7 @@ export const StaticCouncilBoard: React.FC<StaticCouncilBoardProps> = ({ isPopout
 
   const downloadDesktopAgent = () => {
     const a = document.createElement('a');
-    a.href = '/api/desktop-agent.py';
+    a.href = '/api/desktop-agent.py?token=' + encodeURIComponent(localStorage.getItem('omnistar_token') || '');
     a.download = 'omnistar_desktop_agent.py';
     document.body.appendChild(a);
     a.click();
@@ -149,7 +149,7 @@ export const StaticCouncilBoard: React.FC<StaticCouncilBoardProps> = ({ isPopout
 
   const downloadPythonWidget = () => {
     const a = document.createElement('a');
-    a.href = '/api/council/desktop-widget.py';
+    a.href = '/api/council/desktop-widget.py?token=' + encodeURIComponent(localStorage.getItem('omnistar_token') || '');
     a.download = 'desktop_board.py';
     document.body.appendChild(a);
     a.click();

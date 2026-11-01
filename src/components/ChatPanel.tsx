@@ -241,7 +241,7 @@ export const ChatPanel = () => {
 
   const downloadDesktopAgent = () => {
     const a = document.createElement('a');
-    a.href = '/api/desktop-agent.py';
+    a.href = '/api/desktop-agent.py?token=' + encodeURIComponent(localStorage.getItem('omnistar_token') || '');
     a.download = 'omnistar_desktop_agent.py';
     document.body.appendChild(a);
     a.click();
