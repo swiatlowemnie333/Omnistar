@@ -108,6 +108,9 @@ export const ApiKeysPanel: React.FC = () => {
             </span>
           </div>
           <textarea
+            style={{ WebkitTextSecurity: 'disc' } as any}
+            autoComplete="off"
+            spellCheck={false}
             value={openRouterInput}
             onChange={(e) => setOpenRouterInput(e.target.value)}
             rows={3}

@@ -48,6 +48,7 @@ export default function App() {
         <ChatPanel />
         <ModelWizard />
         <ExamPanel />
+      <RealCouncil />
       </div>
 
       {/* GŁÓWNY OBSZAR ROBOCZY: TABLICA STATYCZNA & SFERA 3D */}
@@ -562,3 +563,63 @@ function OrchestratorRanking({ models }: { models: CustomModel[] }) {
         return (<tr key={m.id} className="border-t border-violet-950"><td>{m.name}</td><td className="text-center">{familyOf(m)}</td><td className="text-center">{f('easy')} · {f('medium')} · {f('hard')}</td><td className="text-center">{r.calls ? `${Math.round((100 * r.ok) / r.calls)}% (${r.calls})` : '–'}</td><td className="text-center">{r.calls ? `${Math.round(r.latSum / r.calls / 100) / 10} s` : '–'}</td></tr>); })}</tbody></table>);
 }
 if (typeof window !== 'undefined') (window as any).omnistarOrchestrator = { routeTask, autoTeams, difficultyOf, loadStats, recordGrade };
+
+
+// ===================== PRAWDZIWA RADA – każdy głos to INNY, prawdziwy model z rejestru (zero symulacji) =====================
+type DebateVoice = { label: string; model: string; ms: number; text: string; ok: boolean };
+async function realDebate(topic: string, pickIds?: string[], onStep?: (s: string) => void): Promise<{ voices: DebateVoice[]; synthesis: DebateVoice | null }> {
+  const all = loadModels().filter((m) => m.lastTest?.ok && (!pickIds || pickIds.includes(m.id)));
+  if (all.length < 2) throw new Error('Potrzeba co najmniej 2 działających modeli w rejestrze (masz ' + all.length + '). Dodaj klucze w „+ Dodaj model”.');
+  const ask = async (m: CustomModel, content: string, max = 900): Promise<DebateVoice> => {
+    const t0 = Date.now();
+    try {
+      const r = await fetch('/api/models/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: m.baseUrl, model: m.model, apiKey: m.apiKey, messages: [{ role: 'user', content }], max_tokens: max }) });
+      const d = await r.json();
+      return { label: m.name, model: m.model, ms: Date.now() - t0, text: d.ok ? String(d.content || '') : 'BŁĄD: ' + (d.error || r.status), ok: !!d.ok };
+    } catch (e: any) { return { label: m.name, model: m.model, ms: Date.now() - t0, text: 'BŁĄD: ' + (e?.message || e), ok: false }; }
+  };
+  const rules = 'Odpowiadasz NIEZALEŻNIE, nie widzisz innych głosów. Po polsku, max 200 słów. Podaj JEDNĄ propozycję: (1) jak wykonać, (2) przewidywany efekt bez wymyślonych liczb, (3) jak sprawdzić, (4) ryzyko. Jeśli czegoś nie wiesz – napisz to wprost.';
+  const synthModel = all[all.length - 1];
+  const voters = all.length > 2 ? all.slice(0, -1) : all;
+  onStep?.('Głosy niezależne: ' + voters.map((v) => v.model).join(', '));
+  const voices = await Promise.all(voters.map((m) => ask(m, 'TEMAT RADY:\n' + topic + '\n\n' + rules)));
+  onStep?.('Synteza: ' + synthModel.model);
+  const synthesis = await ask(synthModel, 'Jesteś ambasadorem zadania i przewodniczącym rady. Oto niezależne propozycje RÓŻNYCH modeli AI (każda podpisana nazwą modelu).\nTEMAT:\n' + topic + '\n\n' + voices.map((v, i) => '[' + (i + 1) + '] ' + v.model + ':\n' + v.text).join('\n\n') + '\n\nZadanie: oceń krytycznie (wyłap wymyślone liczby, wycieki danych, słabe punkty) – ale NIE oskarżaj o fałszerstwo bez dowodu, wskaż czego brakuje do weryfikacji. Ułóż ranking propozycji i kolejność testów. Po polsku, max 300 słów.', 1200);
+  const rec = { at: new Date().toISOString(), topic, voices, synthesis };
+  try { const h = JSON.parse(localStorage.getItem('omnistar_debates') || '[]'); h.unshift(rec); localStorage.setItem('omnistar_debates', JSON.stringify(h.slice(0, 30))); } catch { /* ignore */ }
+  return { voices, synthesis };
+}
+if (typeof window !== 'undefined') (window as any).omnistarDebate = realDebate;
+
+function RealCouncil() {
+  const [open, setOpen] = useState(false);
+  const [topic, setTopic] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState('');
+  const [res, setRes] = useState<{ voices: DebateVoice[]; synthesis: DebateVoice | null } | null>(null);
+  const [err, setErr] = useState('');
+  const models = open ? loadModels() : [];
+  const working = models.filter((m) => m.lastTest?.ok);
+  const run = async () => { setBusy(true); setErr(''); setRes(null); try { setRes(await realDebate(topic, undefined, setStep)); } catch (e: any) { setErr(e?.message || String(e)); } setBusy(false); setStep(''); };
+  return (
+    <>
+      <button onClick={() => setOpen(true)} className="fixed bottom-4 right-80 z-50 px-3 py-2 rounded-lg bg-emerald-900/90 border border-emerald-500 text-emerald-100 text-xs font-mono hover:bg-emerald-800 shadow-lg">🧠 Prawdziwa Rada</button>
+      {open && (
+        <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4" onClick={() => setOpen(false)}>
+          <div className="w-full max-w-3xl bg-[#06140f] border border-emerald-700 rounded-xl p-5 text-sm text-gray-200 font-mono space-y-3 max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center"><h2 className="text-emerald-200 font-bold text-base">🧠 Prawdziwa Rada – każdy głos to inny model</h2><button onClick={() => setOpen(false)} className="text-gray-400 hover:text-white">✕</button></div>
+            <div className="text-xs text-emerald-100/80">Działające modele w rejestrze tej przeglądarki: {working.length ? working.map((m) => m.model).join(', ') : 'brak'}. Każdy odpowiada niezależnie, ostatni robi syntezę. Bez symulacji: przy każdej odpowiedzi widać, który model ją napisał i ile trwało.</div>
+            <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={5} className="w-full bg-black/60 border border-emerald-900 rounded p-2" placeholder="Temat / problem dla rady…" />
+            <button disabled={busy || !topic.trim() || working.length < 2} onClick={run} className="px-4 py-2 rounded bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white">{busy ? 'Rada obraduje…' : 'Zwołaj radę'}</button>
+            {step && <div className="text-xs text-emerald-300">{step}</div>}
+            {err && <div className="text-red-300">{err}</div>}
+            {res && (<div className="space-y-2">
+              {res.voices.map((v, i) => (<div key={i} className="border border-emerald-900 rounded p-2"><div className="text-emerald-300 text-xs font-bold">[{i + 1}] {v.model} · {v.ms} ms {v.ok ? '' : '⚠️'}</div><div className="whitespace-pre-wrap text-xs">{v.text}</div></div>))}
+              {res.synthesis && (<div className="border border-amber-700 rounded p-2 bg-amber-950/20"><div className="text-amber-300 text-xs font-bold">SYNTEZA – {res.synthesis.model} · {res.synthesis.ms} ms</div><div className="whitespace-pre-wrap text-xs">{res.synthesis.text}</div></div>)}
+            </div>)}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

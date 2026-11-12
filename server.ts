@@ -6,13 +6,18 @@ import http from 'http';
 import { GoogleGenAI, Type } from '@google/genai';
 import crypto from 'crypto';
 
-// ===== BEZPIECZENSTWO: wspolny token (ustaw OMNISTAR_TOKEN w .env) =====
+// ===== BEZPIECZENSTWO: wspolny token (opcjonalny, ustaw OMNISTAR_TOKEN w .env) =====
 const OMNI_TOKEN = (process.env.OMNISTAR_TOKEN || '').trim();
-if (OMNI_TOKEN.length < 24) {
-  console.error('[BEZPIECZENSTWO] Brak OMNISTAR_TOKEN (min. 24 znaki) - API i sterowanie PC sa ZABLOKOWANE.');
+const IS_TOKEN_REQUIRED = OMNI_TOKEN.length >= 24;
+if (IS_TOKEN_REQUIRED) {
+  console.log('[BEZPIECZENSTWO] OMNISTAR_TOKEN aktywny - API i WebSocket wymagaja autoryzacji.');
+} else {
+  console.log('[BEZPIECZENSTWO] OMNISTAR_TOKEN nie jest ustawiony (lub < 24 znaki) - dostep otwarty dla lokalnego/chmurowego środowiska deweloperskiego.');
 }
+
 function tokenOk(given: unknown): boolean {
-  if (OMNI_TOKEN.length < 24 || typeof given !== 'string') return false;
+  if (!IS_TOKEN_REQUIRED) return true;
+  if (typeof given !== 'string') return false;
   const a = Buffer.from(given);
   const b = Buffer.from(OMNI_TOKEN);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
@@ -631,6 +636,7 @@ Jeśli użytkownik prosi o fizyczną akcję na komputerze (np. otwórz notatnik/
       { name: 'Alibaba Model Studio (USA)', baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1', prefix: /^sk-(?!or-)/, fallbackModels: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen3-coder-plus'] } as any,
       { name: 'Alibaba Model Studio (Pekin)', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', prefix: /^sk-(?!or-)/, fallbackModels: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen3-coder-plus'] } as any,
       { name: 'Alibaba Model Studio (Hongkong)', baseUrl: 'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1', prefix: /^sk-(?!or-)/, fallbackModels: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen3-coder-plus'] } as any,
+      { name: 'NVIDIA NIM', baseUrl: 'https://integrate.api.nvidia.com/v1', prefix: /^nvapi-/, publicList: true, fallbackModels: ['meta/llama-3.1-8b-instruct', 'meta/llama-3.3-70b-instruct'] } as any,
       { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', prefix: /^gsk_/ },
       { name: 'Hugging Face', baseUrl: 'https://router.huggingface.co/v1', prefix: /^hf_/, publicList: true },
       { name: 'Inception (Mercury)', baseUrl: 'https://api.inceptionlabs.ai/v1' },
