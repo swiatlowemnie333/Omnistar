@@ -335,6 +335,12 @@ function ModelWizard() {
           <div className="w-full max-w-xl bg-[#071322] border border-cyan-700 rounded-xl p-5 text-sm text-gray-200 font-mono space-y-3 max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex justify-between items-center"><h2 className="text-cyan-200 font-bold text-base">Agent modeli: dodaj nowy model</h2><button onClick={() => setOpen(false)} className="text-gray-400 hover:text-white">✕</button></div>
             <div className="bg-cyan-950/50 border border-cyan-900 rounded p-2 text-cyan-100">{msg}</div>
+            <div className="border border-fuchsia-800 rounded p-2 bg-fuchsia-950/20 space-y-1">
+              <div className="text-fuchsia-200 font-bold">🚀 Dział Innowacji – propozycje dnia</div>
+              <div className="text-[11px] text-fuchsia-100/70">Codziennie 3 darmowe źródła, których jeszcze nie masz. Kliknij, wygeneruj klucz na stronie dostawcy, wklej niżej i „Rozpoznaj”.</div>
+              {(() => { const missing = KEY_SOURCES.filter((s) => !models.some((x) => x.baseUrl.includes(s.match))); const day = Math.floor(Date.now() / 86400000); const pick = missing.length <= 3 ? missing : [0, 1, 2].map((k) => missing[(day * 3 + k) % missing.length]); return pick.length ? pick.map((s) => (
+                <div key={s.name} className="flex justify-between items-center gap-2 text-xs"><span><b className="text-fuchsia-100">{s.name}</b> <span className="text-emerald-300">🆓 {s.free}</span></span><a href={s.url} target="_blank" rel="noopener noreferrer" className="px-2 py-0.5 rounded bg-fuchsia-800 hover:bg-fuchsia-700 text-white whitespace-nowrap">Wygeneruj klucz ↗</a></div>)) : <div className="text-xs text-emerald-300">Masz już wszystkie źródła z katalogu 🎉</div>; })()}
+            </div>
             <details className="border border-amber-800 rounded p-2 bg-amber-950/20">
               <summary className="cursor-pointer text-amber-200 font-bold">🔑 Nie masz klucza? Pokażę, gdzie go wygenerować</summary>
               <div className="mt-2 space-y-2">
@@ -568,12 +574,17 @@ if (typeof window !== 'undefined') (window as any).omnistarOrchestrator = { rout
 // ===================== PRAWDZIWA RADA – każdy głos to INNY, prawdziwy model z rejestru (zero symulacji) =====================
 type DebateVoice = { label: string; model: string; ms: number; text: string; ok: boolean };
 async function realDebate(topic: string, pickIds?: string[], onStep?: (s: string) => void): Promise<{ voices: DebateVoice[]; synthesis: DebateVoice | null }> {
-  const all = loadModels().filter((m) => m.lastTest?.ok && (!pickIds || pickIds.includes(m.id)));
-  if (all.length < 2) throw new Error('Potrzeba co najmniej 2 działających modeli w rejestrze (masz ' + all.length + '). Dodaj klucze w „+ Dodaj model”.');
-  const ask = async (m: CustomModel, content: string, max = 900): Promise<DebateVoice> => {
+  let all: any[] = loadModels().filter((m) => m.lastTest?.ok && (!pickIds || pickIds.includes(m.id)));
+  onStep?.('Sprawdzam klucze w sekretach serwera…');
+  try {
+    const sc = await (await fetch('/api/models/env-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
+    for (const e of (sc.models || [])) if (e.ok && !all.some((m: any) => m.model === e.model)) all.push({ id: 'env:' + e.env, name: 'serwer: ' + e.provider, baseUrl: e.baseUrl, model: e.model, apiKey: '', envKey: e.env, addedAt: 0, lastTest: { ok: true, latencyMs: 0, at: 0 } });
+  } catch { /* brak skanu – zostają modele z przeglądarki */ }
+  if (all.length < 2) throw new Error('Potrzeba co najmniej 2 działających modeli (przeglądarka + sekrety serwera: ' + all.length + '). Dodaj klucze w „+ Dodaj model”.');
+  const ask = async (m: any, content: string, max = 900): Promise<DebateVoice> => {
     const t0 = Date.now();
     try {
-      const r = await fetch('/api/models/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: m.baseUrl, model: m.model, apiKey: m.apiKey, messages: [{ role: 'user', content }], max_tokens: max }) });
+      const r = await fetch('/api/models/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: m.baseUrl, model: m.model, apiKey: m.apiKey, envKey: (m as any).envKey, messages: [{ role: 'user', content }], max_tokens: max }) });
       const d = await r.json();
       return { label: m.name, model: m.model, ms: Date.now() - t0, text: d.ok ? String(d.content || '') : 'BŁĄD: ' + (d.error || r.status), ok: !!d.ok };
     } catch (e: any) { return { label: m.name, model: m.model, ms: Date.now() - t0, text: 'BŁĄD: ' + (e?.message || e), ok: false }; }
@@ -586,6 +597,12 @@ async function realDebate(topic: string, pickIds?: string[], onStep?: (s: string
   onStep?.('Synteza: ' + synthModel.model);
   const synthesis = await ask(synthModel, 'Jesteś ambasadorem zadania i przewodniczącym rady. Oto niezależne propozycje RÓŻNYCH modeli AI (każda podpisana nazwą modelu).\nTEMAT:\n' + topic + '\n\n' + voices.map((v, i) => '[' + (i + 1) + '] ' + v.model + ':\n' + v.text).join('\n\n') + '\n\nZadanie: oceń krytycznie (wyłap wymyślone liczby, wycieki danych, słabe punkty) – ale NIE oskarżaj o fałszerstwo bez dowodu, wskaż czego brakuje do weryfikacji. Ułóż ranking propozycji i kolejność testów. Po polsku, max 300 słów.', 1200);
   const rec = { at: new Date().toISOString(), topic, voices, synthesis };
+  // wyniki na wspólną tablicę rady (serwer) – widoczne z każdej przeglądarki, bez kluczy
+  try {
+    const post = (it: any) => fetch('/api/council/board/item', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(it) });
+    for (const vo of voices) await post({ type: 'real_council_voice', agentName: vo.model, provider: vo.label, content: vo.text });
+    if (synthesis) await post({ type: 'real_council_synthesis', agentName: synthesis.model, provider: synthesis.label, content: synthesis.text });
+  } catch { /* ignore */ }
   try { const h = JSON.parse(localStorage.getItem('omnistar_debates') || '[]'); h.unshift(rec); localStorage.setItem('omnistar_debates', JSON.stringify(h.slice(0, 30))); } catch { /* ignore */ }
   return { voices, synthesis };
 }
@@ -601,6 +618,27 @@ function RealCouncil() {
   const models = open ? loadModels() : [];
   const working = models.filter((m) => m.lastTest?.ok);
   const run = async () => { setBusy(true); setErr(''); setRes(null); try { setRes(await realDebate(topic, undefined, setStep)); } catch (e: any) { setErr(e?.message || String(e)); } setBusy(false); setStep(''); };
+  // Zlecenia rady z tablicy (np. od koordynatora Claude): ta przeglądarka wykonuje je SWOIMI kluczami i odsyła wyniki
+  const runningReq = React.useRef(false);
+  useEffect(() => {
+    const tick = async () => {
+      if (runningReq.current) return;
+      try {
+        const b = await (await fetch('/api/council/board')).json(); const items: any[] = b.items || [];
+        const done = new Set(items.filter((x) => x.type === 'council_done').map((x) => x.thought));
+        let handled: string[] = []; try { handled = JSON.parse(localStorage.getItem('omnistar_council_handled') || '[]'); } catch { /* */ }
+        const req = items.find((x) => x.type === 'council_request' && !done.has(x.id) && !handled.includes(x.id));
+        if (!req) return;
+        runningReq.current = true; handled.push(req.id); localStorage.setItem('omnistar_council_handled', JSON.stringify(handled.slice(-50)));
+        await fetch('/api/council/board/item', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'council_ack', thought: req.id, agentName: 'przeglądarka z kluczami', content: 'Podjęto zlecenie rady: ' + String(req.content).slice(0, 80) }) });
+        let summary = '';
+        try { const r = await realDebate(String(req.content)); summary = 'OK: ' + r.voices.map((x) => x.model).join(', ') + (r.synthesis ? ' → synteza ' + r.synthesis.model : ''); } catch (e: any) { summary = 'BŁĄD: ' + (e?.message || e); }
+        await fetch('/api/council/board/item', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'council_done', thought: req.id, agentName: 'przeglądarka z kluczami', content: summary }) });
+      } catch { /* serwer niedostępny */ } finally { runningReq.current = false; }
+    };
+    const id = setInterval(tick, 20000); tick();
+    return () => clearInterval(id);
+  }, []);
   return (
     <>
       <button onClick={() => setOpen(true)} className="fixed bottom-4 right-80 z-50 px-3 py-2 rounded-lg bg-emerald-900/90 border border-emerald-500 text-emerald-100 text-xs font-mono hover:bg-emerald-800 shadow-lg">🧠 Prawdziwa Rada</button>

@@ -691,8 +691,35 @@ Jeśli użytkownik prosi o fizyczną akcję na komputerze (np. otwórz notatnik/
 
   // KREATOR MODELI: wywołanie modelu z rejestru (dla ról komórki agentów: Alfa/Beta, recenzenci)
   // Samo dopasowuje się do limitów: 'za duże zapytanie' -> mniejszy max_tokens; limit na minutę -> czeka; pusta odpowiedź -> ponawia.
+  // Skan sekretów serwera: które zmienne z kluczami istnieją i do jakiego dostawcy/modelu pasują. Zwraca TYLKO nazwy, nigdy wartości kluczy.
+  let envScanCache: any[] | null = null; let envScanAt = 0;
+  app.post('/api/models/env-scan', async (req, res) => {
+    if (envScanCache && Date.now() - envScanAt < 30 * 60 * 1000 && !(req.body || {}).force) return res.json({ ok: true, models: envScanCache, cached: true });
+    const port = Number(process.env.PORT) || 3000; const base = 'http://127.0.0.1:' + port;
+    const hdr: any = { 'Content-Type': 'application/json' }; if (OMNI_TOKEN) hdr['x-omnistar-token'] = OMNI_TOKEN;
+    const names = Object.keys(process.env).filter((k) => /(API_KEY|_KEY|API_K[A-Z]*)$/.test(k) && !/OMNISTAR|^npm_/i.test(k) && String(process.env[k] || '').trim().length > 15);
+    const outM: any[] = [];
+    for (const env of names) {
+      try {
+        const d = await (await fetch(base + '/api/models/detect', { method: 'POST', headers: hdr, body: JSON.stringify({ apiKey: String(process.env[env]).trim() }) })).json();
+        if (!d.ok) { outM.push({ env, ok: false, error: String(d.error || '').slice(0, 120) }); continue; }
+        let picked = ''; for (const m of (d.models || []).slice(0, 6)) {
+          const t = await (await fetch(base + '/api/models/test', { method: 'POST', headers: hdr, body: JSON.stringify({ baseUrl: d.baseUrl, model: m.id, apiKey: String(process.env[env]).trim() }) })).json();
+          if (t.ok) { picked = m.id; break; }
+        }
+        outM.push({ env, ok: !!picked, provider: d.provider, baseUrl: d.baseUrl, model: picked, error: picked ? '' : 'żaden z pierwszych modeli nie odpowiedział' });
+      } catch (e: any) { outM.push({ env, ok: false, error: String(e?.message || e).slice(0, 120) }); }
+    }
+    envScanCache = outM; envScanAt = Date.now();
+    res.json({ ok: true, models: outM });
+  });
+
   app.post('/api/models/chat', async (req, res) => {
-    const { baseUrl = '', model = '', apiKey = '', messages = [] } = req.body || {};
+    const { baseUrl = '', model = '', messages = [] } = req.body || {};
+    let apiKey = String((req.body || {}).apiKey || '').trim();
+    // Klucz z sekretów serwera (podawana jest tylko NAZWA zmiennej, nigdy wartość)
+    const envKey = String((req.body || {}).envKey || '');
+    if (!apiKey && /^[A-Z0-9_]+$/.test(envKey) && envKey !== 'OMNISTAR_TOKEN') apiKey = String(process.env[envKey] || '').trim();
     let maxTok = Number((req.body || {}).max_tokens) || 1500;
     if (!/^https:\/\//.test(String(baseUrl)) || !model || !apiKey) return res.json({ ok: false, error: 'Brak adresu https, modelu lub klucza.' });
     const t0 = Date.now(); let lastErr = ''; const notes: string[] = [];
