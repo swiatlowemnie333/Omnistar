@@ -623,6 +623,7 @@ function RealCouncil() {
   useEffect(() => {
     const tick = async () => {
       if (runningReq.current) return;
+      if (loadModels().filter((m) => m.lastTest?.ok).length < 2) return; // tylko przeglądarka z co najmniej 2 działającymi modelami podejmuje zlecenia
       try {
         const b = await (await fetch('/api/council/board')).json(); const items: any[] = b.items || [];
         const done = new Set(items.filter((x) => x.type === 'council_done').map((x) => x.thought));
