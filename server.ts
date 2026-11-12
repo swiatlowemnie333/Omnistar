@@ -594,6 +594,125 @@ Jeśli użytkownik prosi o fizyczną akcję na komputerze (np. otwórz notatnik/
     });
   });
 
+  // KREATOR MODELI: test dowolnego modelu zgodnego z OpenAI (klucz tylko do tego wywołania, nie jest zapisywany)
+  app.post('/api/models/test', async (req, res) => {
+    const { baseUrl = '', model = '', apiKey = '' } = req.body || {};
+    if (!/^https:\/\//.test(String(baseUrl)) || !model || !apiKey) return res.json({ ok: false, error: 'Brak adresu https, modelu lub klucza.' });
+    const t0 = Date.now();
+    try {
+      const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 45000);
+      const resp = await fetch(String(baseUrl).replace(/\/+$/, '') + '/chat/completions', {
+        method: 'POST', signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Odpowiedz jednym słowem: działa' }], max_tokens: 400 })
+      });
+      clearTimeout(timer);
+      const data: any = await resp.json().catch(() => ({}));
+      if (!resp.ok) return res.json({ ok: false, latencyMs: Date.now() - t0, error: `HTTP ${resp.status}: ${String(data?.error?.message || data?.error || '').slice(0, 200)}` });
+      const msg0 = data?.choices?.[0]?.message || {};
+      const reply = msg0.content || msg0.reasoning_content || msg0.reasoning || '';
+      // HTTP 200 z poprawną strukturą = klucz i model działają (modele rozumujące mogą zwrócić pustą treść przy krótkim limicie)
+      const okStruct = Array.isArray(data?.choices);
+      return res.json({ ok: okStruct, latencyMs: Date.now() - t0, reply: String(reply || '(odpowiedź pusta, ale model działa)').slice(0, 200), error: okStruct ? undefined : 'Nieoczekiwany format odpowiedzi: ' + JSON.stringify(data).slice(0, 150) });
+    } catch (e: any) {
+      return res.json({ ok: false, latencyMs: Date.now() - t0, error: e?.name === 'AbortError' ? 'Przekroczono 45 s' : String(e?.message || e) });
+    }
+  });
+
+  // KREATOR MODELI: rozpoznanie dostawcy po samym kluczu + lista modeli dostępnych na tym kluczu
+  app.post('/api/models/detect', async (req, res) => {
+    const apiKey = String((req.body || {}).apiKey || '').trim();
+    if (!apiKey) return res.json({ ok: false, error: 'Brak klucza.' });
+    type Prov = { name: string; baseUrl: string; prefix?: RegExp; verify?: string; publicList?: boolean };
+    const PROVIDERS: Prov[] = [
+      { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', prefix: /^sk-or-/, verify: 'https://openrouter.ai/api/v1/key', publicList: true },
+      { name: 'Google AI Studio (Gemini)', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', prefix: /^AIza/ },
+      { name: 'Alibaba Model Studio (Singapur)', baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', prefix: /^sk-(?!or-)/, fallbackModels: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen3-coder-plus'] } as any,
+      { name: 'Alibaba Model Studio (USA)', baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1', prefix: /^sk-(?!or-)/, fallbackModels: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen3-coder-plus'] } as any,
+      { name: 'Alibaba Model Studio (Pekin)', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', prefix: /^sk-(?!or-)/, fallbackModels: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen3-coder-plus'] } as any,
+      { name: 'Alibaba Model Studio (Hongkong)', baseUrl: 'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1', prefix: /^sk-(?!or-)/, fallbackModels: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen3-coder-plus'] } as any,
+      { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', prefix: /^gsk_/ },
+      { name: 'Hugging Face', baseUrl: 'https://router.huggingface.co/v1', prefix: /^hf_/, publicList: true },
+      { name: 'Inception (Mercury)', baseUrl: 'https://api.inceptionlabs.ai/v1' },
+      { name: 'Mistral', baseUrl: 'https://api.mistral.ai/v1' },
+      { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', prefix: /^sk-/ },
+      { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', prefix: /^sk-(proj-)?/ },
+      { name: 'Together', baseUrl: 'https://api.together.xyz/v1' },
+      { name: 'Cerebras', baseUrl: 'https://api.cerebras.ai/v1', prefix: /^csk-/ },
+      { name: 'xAI (Grok)', baseUrl: 'https://api.x.ai/v1', prefix: /^xai-/ }
+    ];
+    const byPrefix = PROVIDERS.filter((p) => p.prefix && p.prefix.test(apiKey));
+    // dostawcy z publiczną listą modeli liczą się tylko przy pasującym prefiksie (inaczej każdy klucz by „pasował”)
+    const rest = PROVIDERS.filter((p) => !byPrefix.includes(p) && !p.publicList);
+    const order = [...byPrefix, ...rest];
+    const tried: string[] = [];
+    for (const p of order) {
+      try {
+        const h = { Authorization: `Bearer ${apiKey}` };
+        if (p.verify) { const v = await fetch(p.verify, { headers: h }); if (!v.ok) { tried.push(`${p.name}: ${v.status}`); continue; } }
+        const r = await fetch(p.baseUrl + '/models', { headers: h });
+        if (!r.ok && (r.status === 404 || r.status === 405) && (p as any).fallbackModels) {
+          const fm: string[] = (p as any).fallbackModels;
+          const c = await fetch(p.baseUrl + '/chat/completions', { method: 'POST', headers: { ...h, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: fm[0], messages: [{ role: 'user', content: 'ok' }], max_tokens: 5 }) }).catch(() => null);
+          if (c && c.ok) return res.json({ ok: true, provider: p.name, baseUrl: p.baseUrl, models: fm.map((id) => ({ id, free: false, context: null })), tried, note: 'Lista modeli niedostępna, podano typowe.' });
+          tried.push(`${p.name}: brak listy, test ${c ? c.status : 'brak'}`); continue;
+        }
+        if (!r.ok) { tried.push(`${p.name}: ${r.status}`); continue; }
+        const data: any = await r.json().catch(() => ({}));
+        const list: any[] = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
+        if (!list.length) { tried.push(`${p.name}: pusta lista`); continue; }
+        // lista publiczna (bez klucza też działa)? -> sprawdź klucz mikrowywołaniem modelu
+        if (!p.verify) {
+          const anon = await fetch(p.baseUrl + '/models').catch(() => null);
+          if (anon && anon.ok) {
+            const firstId = String(list[0]?.id || list[0]?.name || '').replace(/^models\//, '');
+            const c = await fetch(p.baseUrl + '/chat/completions', { method: 'POST', headers: { ...h, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: firstId, messages: [{ role: 'user', content: 'ok' }], max_tokens: 1 }) }).catch(() => null);
+            if (!c || c.status === 401 || c.status === 403) { tried.push(`${p.name}: klucz odrzucony (${c ? c.status : 'brak'})`); continue; }
+          }
+        }
+        const models = list.map((m: any) => {
+          const id = String(m.id || m.name || '').replace(/^models\//, '');
+          const free = /:free$/.test(id) || (m.pricing && Number(m.pricing.prompt) === 0 && Number(m.pricing.completion) === 0);
+          return { id, free: !!free, context: m.context_length || m.context_window || null };
+        }).filter((m: any) => m.id && !/embed|whisper|tts|guard|moderation|image|vision-only|audio|veo|imagen|aqa|learnlm|live|robotics|computer-use|transcrib|rerank|lyria/i.test(m.id));
+        const fast = (id: string) => (/flash|mini|turbo|instant|plus|lite/i.test(id) ? 1 : 0) - (/preview|exp|pro|ultra|max/i.test(id) ? 0.5 : 0);
+        models.sort((a: any, b: any) => Number(b.free) - Number(a.free) || fast(b.id) - fast(a.id) || (b.context || 0) - (a.context || 0));
+        return res.json({ ok: true, provider: p.name, baseUrl: p.baseUrl, models: models.slice(0, 400), tried });
+      } catch (e: any) { tried.push(`${p.name}: ${String(e?.message || e).slice(0, 60)}`); }
+    }
+    return res.json({ ok: false, error: 'Nie rozpoznano klucza u znanych dostawców.', tried });
+  });
+
+  // KREATOR MODELI: wywołanie modelu z rejestru (dla ról komórki agentów: Alfa/Beta, recenzenci)
+  // Samo dopasowuje się do limitów: 'za duże zapytanie' -> mniejszy max_tokens; limit na minutę -> czeka; pusta odpowiedź -> ponawia.
+  app.post('/api/models/chat', async (req, res) => {
+    const { baseUrl = '', model = '', apiKey = '', messages = [] } = req.body || {};
+    let maxTok = Number((req.body || {}).max_tokens) || 1500;
+    if (!/^https:\/\//.test(String(baseUrl)) || !model || !apiKey) return res.json({ ok: false, error: 'Brak adresu https, modelu lub klucza.' });
+    const t0 = Date.now(); let lastErr = ''; const notes: string[] = [];
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const resp = await fetch(String(baseUrl).replace(/\/+$/, '') + '/chat/completions', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+          body: JSON.stringify({ model, messages, max_tokens: maxTok })
+        });
+        const data: any = await resp.json().catch(() => ({}));
+        const errMsg = String(data?.error?.message || data?.error || '');
+        if (resp.status === 429 && /too large|reduce max_tokens|Requested \d+/i.test(errMsg)) {
+          const lim = Number((errMsg.match(/Limit (\d+)/) || [])[1]) || Math.floor(maxTok / 2);
+          maxTok = Math.max(150, Math.floor(lim * 0.8)); notes.push(`limit tokenów -> ${maxTok}`); lastErr = errMsg; continue;
+        }
+        if (resp.status === 429 || resp.status >= 500) { notes.push(`HTTP ${resp.status}, czekam`); lastErr = errMsg; await new Promise((r) => setTimeout(r, 15000 * (attempt + 1))); continue; }
+        if (!resp.ok) return res.json({ ok: false, latencyMs: Date.now() - t0, error: `HTTP ${resp.status}: ${errMsg.slice(0, 300)}` });
+        const content = data?.choices?.[0]?.message?.content ?? '';
+        const finish = data?.choices?.[0]?.finish_reason;
+        if (!String(content).trim() || (finish === 'length' && String(content).length < 40)) { maxTok = Math.floor(maxTok * 1.6); notes.push(`pusta/ucięta odpowiedź -> ${maxTok}`); lastErr = 'pusta odpowiedź'; continue; }
+        return res.json({ ok: true, latencyMs: Date.now() - t0, content, finishReason: finish, usage: data?.usage, notes });
+      } catch (e: any) { lastErr = String(e?.message || e); notes.push('wyjątek'); await new Promise((r) => setTimeout(r, 5000)); }
+    }
+    return res.json({ ok: false, latencyMs: Date.now() - t0, error: `Po 5 próbach: ${lastErr.slice(0, 250)}`, notes });
+  });
+
   // REAL MULTI-AGENT REASONING & DESKTOP CONTROL ENDPOINT (ZERO HARDCODED TEMPLATES!)
   app.post('/api/council/deliberate', async (req, res) => {
     const {
@@ -923,6 +1042,409 @@ BEZWZGLĘDNE ZAKAZY (ŻELAZNE REGUŁY):
       return res.json({ success: true, item: fullItem });
     }
     res.status(400).json({ success: false, error: 'Brak treści wpisu' });
+  });
+
+  // =========================================================================
+  // MODUŁ: TŁUMACZ KSIĄŻEK (PANDOC MARKDOWN) - BACKEND EXPRSS (ZERO SYMULACJI)
+  // =========================================================================
+
+  // Helper to resolve OpenRouter keys with comma rotation
+  function parseOpenRouterKeys(customKeys?: string): string[] {
+    const raw = (customKeys || process.env.OPENROUTER_API_KEY || '').trim();
+    return raw
+      .split(',')
+      .map((k) => k.trim())
+      .filter((k) => k.length > 5);
+  }
+
+  // Call OpenRouter with key rotation on 429 errors and candidate models
+  async function callOpenRouterWithRotation(
+    keys: string[],
+    preferredModel: string,
+    messages: { role: string; content: string }[],
+    temperature = 0.3,
+    isAsian = false
+  ): Promise<{ text: string; modelUsed: string }> {
+    if (keys.length === 0) {
+      throw new Error(
+        'Brak klucza OpenRouter. Wprowadź klucz (sk-or-...) w zakładce Klucze lub skonfiguruj OPENROUTER_API_KEY w panelu Secrets.'
+      );
+    }
+
+    // List of candidate models to try in priority order
+    const candidateModels = isAsian
+      ? [
+          preferredModel && preferredModel.includes('qwen') ? preferredModel : 'qwen/qwen-2.5-72b-instruct',
+          'qwen/qwen-2.5-coder-32b-instruct',
+          'nvidia/nemotron-3-ultra-550b-a55b:free',
+          'openrouter/free'
+        ]
+      : [
+          preferredModel || 'nvidia/nemotron-3-ultra-550b-a55b:free',
+          'meta-llama/llama-3.3-70b-instruct',
+          'google/gemini-2.5-flash',
+          'nvidia/nemotron-3-ultra-550b-a55b:free',
+          'openrouter/free',
+          'cohere/north-mini-code:free'
+        ];
+
+    const uniqueModels = Array.from(new Set(candidateModels.filter(Boolean)));
+    let lastError = '';
+
+    for (const model of uniqueModels) {
+      for (let i = 0; i < keys.length; i++) {
+        const activeKey = keys[i];
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 90000);
+          const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${activeKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'https://aistudio.google.com',
+              'X-Title': 'Omnistar Book Translator'
+            },
+            body: JSON.stringify({
+              model,
+              messages,
+              temperature,
+              max_tokens: 4096
+            }),
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+
+          const data: any = await resp.json();
+          if (resp.status === 429) {
+            lastError = `Klucz #${i + 1} zwrócił błąd 429: ${data?.error?.message || 'Rate Limit'}`;
+            console.warn(`[OpenRouter 429] Rotacja klucza ${i + 1}/${keys.length} -> kolejny klucz.`);
+            continue; // Try next key
+          }
+
+          if (!resp.ok) {
+            lastError = data?.error?.message || `HTTP ${resp.status} z OpenRouter (${model})`;
+            console.warn(`[OpenRouter Model Failed: ${model}]`, lastError);
+            break; // Try next model for this key
+          }
+
+          const content = data?.choices?.[0]?.message?.content;
+          if (!content && content !== '') {
+            lastError = `Pusta treść odpowiedzi od modelu ${model}`;
+            break;
+          }
+
+          return { text: content.trim(), modelUsed: data?.model || model };
+        } catch (err: any) {
+          lastError = err?.message || String(err);
+          if (i < keys.length - 1) {
+            continue;
+          }
+        }
+      }
+    }
+
+    throw new Error(`Wszystkie klucze i modele OpenRouter zawiodły. Ostatni błąd: ${lastError}`);
+  }
+
+  // Call Gemini or fallback to OpenRouter
+  async function callTranslatorEngine(
+    systemPrompt: string,
+    userPrompt: string,
+    targetLang: string,
+    customGeminiKey?: string,
+    customOpenRouterKeys?: string,
+    preferredModel?: string
+  ): Promise<{ text: string; providerLabel: string }> {
+    const isAsian = targetLang === 'ja' || targetLang === 'zh-Hant';
+    const orKeys = parseOpenRouterKeys(customOpenRouterKeys);
+
+    // 1. Try Gemini 3.8 Flash FIRST (unless Asian and user specified Qwen preference, but user requested Gemini 3.8 Flash then OpenRouter)
+    const geminiKey = (customGeminiKey || process.env.GEMINI_API_KEY || '').trim();
+    if (geminiKey && geminiKey !== invalidGeminiKeyCache) {
+      try {
+        const client = new GoogleGenAI({
+          apiKey: geminiKey,
+          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+        });
+        const resp = await client.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: `${systemPrompt}\n\n${userPrompt}`
+        });
+        const text = resp.text?.trim();
+        if (text) {
+          return { text, providerLabel: 'Gemini 3.8 Flash' };
+        }
+      } catch (geminiErr: any) {
+        const gMsg = geminiErr?.message || String(geminiErr);
+        console.warn('[Translator Gemini Fallback] Gemini failed, attempting OpenRouter:', gMsg);
+        if (gMsg.includes('ACCOUNT_STATE_INVALID') || gMsg.includes('UNAUTHENTICATED')) {
+          invalidGeminiKeyCache = geminiKey;
+        }
+        if (orKeys.length === 0) {
+          throw new Error(`Błąd Gemini 3.8 Flash: ${gMsg}. Wprowadź klucz OpenRouter w zakładce Klucze dla fallbacku.`);
+        }
+      }
+    }
+
+    // 2. OpenRouter fallback or primary if Gemini unavailable
+    const modelToUse = isAsian
+      ? 'qwen/qwen-2.5-72b-instruct'
+      : (preferredModel || 'nvidia/nemotron-3-ultra-550b-a55b:free');
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ];
+
+    const orResult = await callOpenRouterWithRotation(orKeys, modelToUse, messages, 0.3, isAsian);
+    return { text: orResult.text, providerLabel: `OpenRouter (${orResult.modelUsed})` };
+  }
+
+  // 1. SŁOWNIK SPÓJNOŚCI (GLOSSARY) PRZED TŁUMACZENIEM
+  app.post('/api/translate/glossary', async (req, res) => {
+    const {
+      targetLang,
+      sampleText = '',
+      geminiKey,
+      openRouterKeys,
+      preferredModel
+    } = req.body || {};
+
+    if (!targetLang) {
+      return res.status(400).json({ error: 'Brak docelowego języka (targetLang)' });
+    }
+
+    const languageNames: Record<string, string> = {
+      de: 'niemiecki (Deutsch, bezpośredni rejestr "du")',
+      es: 'hiszpański (Español, bezpośredni rejestr "tú")',
+      fr: 'francuski (Français, bezpośredni rejestr "tu")',
+      it: 'włoski (Italiano, bezpośredni rejestr "tu")',
+      ja: 'japoński (日本語, uprzejmy bezpośredni styl "です/ます")',
+      pl: 'polski (Polski, bezpośredni rejestr "ty")',
+      'zh-Hant': 'chiński tradycyjny (繁體中文, bezpośredni rejestr "你")',
+      ru: 'rosyjski (Русский, bezpośredni rejestr "ты")'
+    };
+
+    const targetLangName = languageNames[targetLang] || targetLang;
+
+    const systemPrompt = `Jesteś ekspertem terminologii literackiej i redaktorem wydawniczym.
+Tworzysz oficjalny Słownik Spójności Terminologicznej (Consistency Glossary) dla tłumaczenia książki samopomocowej/psychologicznej z języka angielskiego na język: ${targetLangName}.
+
+BEZWZGLĘDNE REGUŁY:
+1. Imiona postaci (Anna, Mark, Victoria, Leo, Linda, Josh, Claire, Greg, Frank) i pseudonim autora 'John Routefinder' POZOSTAJĄ BEZ ZMIAN w alfabecie łacińskim (w japońskim/chińskim/rosyjskim podaj formę w alfabecie docelowym lub zachowaj oryginał, zgodnie ze standardem rynkowym).
+2. Kluczowe archetypy i terminy:
+   - "The Escaper"
+   - "The Planner"
+   - "The Controller"
+   - "Worksheet"
+   - "Workbook"
+   - "Protected block" / "Protected blocks"
+   - "Raw Truth"
+   - "Routefinder" / "The Routefinder Method"
+   - "Comfort Trap"
+   - "Safety Anchor"
+3. Tłumaczenie zdania do stopki praw autorskich:
+   Ustal dokładne brzmienie zdania w języku docelowym: "Przetłumaczono z języka angielskiego z pomocą AI" (np. de: "Aus dem Englischen mit Hilfe von KI übersetzt", fr: "Traduit de l'anglais avec l'aide de l'IA", es: "Traducido del inglés con la ayuda de IA", it: "Tradotto dall'inglese con l'aiuto dell'IA", ja: "AIの支援を受けて英語から翻訳されました", pl: "Przetłumaczono z języka angielskiego z pomocą AI", zh-Hant: "由人工智慧輔助自英文翻譯", ru: "Переведено с английского языка с помощью ИИ").
+
+Zwróć odpowiedź w czystym formacie JSON:
+{
+  "copyrightNotice": "Dokładne zdanie w języku docelowym",
+  "terms": {
+    "The Escaper": "...",
+    "The Planner": "...",
+    "The Controller": "...",
+    "Worksheet": "...",
+    "Workbook": "...",
+    "protected block": "...",
+    "Raw Truth": "...",
+    "Comfort Trap": "...",
+    "Safety Anchor": "..."
+  },
+  "notes": "Krótka wytyczna stylistyczna (1 zdanie)"
+}`;
+
+    const userPrompt = `Przeanalizuj poniższy fragment rękopisu i przygotuj oficjalny słownik dla języka: ${targetLangName}.\n\nPRÓBKA RĘKOPISU:\n${String(sampleText).slice(0, 4000)}`;
+
+    try {
+      const outcome = await callTranslatorEngine(
+        systemPrompt,
+        userPrompt,
+        targetLang,
+        geminiKey,
+        openRouterKeys,
+        preferredModel
+      );
+
+      let parsedJson: any = null;
+      try {
+        const clean = outcome.text.replace(/^```json/i, '').replace(/```$/i, '').trim();
+        parsedJson = JSON.parse(clean);
+      } catch {
+        const firstBrace = outcome.text.indexOf('{');
+        const lastBrace = outcome.text.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          parsedJson = JSON.parse(outcome.text.slice(firstBrace, lastBrace + 1));
+        } else {
+          parsedJson = { raw: outcome.text, terms: {}, copyrightNotice: 'Przetłumaczono z języka angielskiego z pomocą AI' };
+        }
+      }
+
+      return res.json({
+        success: true,
+        targetLang,
+        glossary: parsedJson,
+        provider: outcome.providerLabel
+      });
+    } catch (err: any) {
+      console.error('Błąd generowania słownika:', err);
+      return res.status(500).json({
+        success: false,
+        error: err?.message || String(err)
+      });
+    }
+  });
+
+  // 2. DWUETAPOWE TŁUMACZENIE FRAGMENTU: AGENT TŁUMACZ -> AGENT REDAKTOR
+  app.post('/api/translate/chunk', async (req, res) => {
+    const {
+      chunkIndex,
+      totalChunks,
+      chunkText,
+      targetLang,
+      glossary,
+      geminiKey,
+      openRouterKeys,
+      preferredModel
+    } = req.body || {};
+
+    if (!chunkText || !targetLang) {
+      return res.status(400).json({ error: 'Brak tekstu fragmentu (chunkText) lub języka (targetLang)' });
+    }
+
+    const languageSpecs: Record<string, { name: string; register: string; copyright: string }> = {
+      de: { name: 'niemiecki (Deutsch)', register: 'bezpośredni "du" / "dein" (szczery, dynamiczny)', copyright: 'Aus dem Englischen mit Hilfe von KI übersetzt.' },
+      es: { name: 'hiszpański (Español)', register: 'bezpośredni "tú" / "tu" (bezpośredni, motywujący)', copyright: 'Traducido del inglés con la ayuda de IA.' },
+      fr: { name: 'francuski (Français)', register: 'bezpośredni "tu" / "ton" (bliski czytelnikowi, szczery)', copyright: 'Traduit de l\'anglais avec l\'aide de l\'IA.' },
+      it: { name: 'włoski (Italiano)', register: 'bezpośredni "tu" / "tuo" (bezpośredni, żywy)', copyright: 'Tradotto dall\'inglese con l\'aiuto dell\'IA.' },
+      ja: { name: 'japoński (日本語)', register: 'styl "です/ます" (uprzejmy, ale bezpośredni i osobisty dla czytelnika)', copyright: 'AIの支援を受けて英語から翻訳されました。' },
+      pl: { name: 'polski (Polski)', register: 'bezpośredni "ty" / "twój" (autentyczny, szczery, konkretny)', copyright: 'Przetłumaczono z języka angielskiego z pomocą AI.' },
+      'zh-Hant': { name: 'chiński tradycyjny (繁體中文)', register: 'bezpośredni "你" / "你的" (szczery, dynamiczny)', copyright: '由人工智慧輔助自英文翻譯。' },
+      ru: { name: 'rosyjski (Русский)', register: 'bezpośredni "ты" / "твой" (konkretny, szczery)', copyright: 'Переведено с английского языка с помощью ИИ.' }
+    };
+
+    const spec = languageSpecs[targetLang] || { name: targetLang, register: 'bezpośredni', copyright: 'Przetłumaczono z języka angielskiego z pomocą AI.' };
+
+    const termsListing = glossary?.terms
+      ? Object.entries(glossary.terms)
+          .map(([en, tr]) => `• "${en}" -> "${tr}"`)
+          .join('\n')
+      : '• The Escaper, The Planner, The Controller (archetypy)\n• Worksheet, Workbook, protected block, Raw Truth';
+
+    const copyrightClause = glossary?.copyrightNotice || spec.copyright;
+
+    // ETAP 1: AGENT TŁUMACZ
+    const translatorSystem = `Jesteś profesjonalnym tłumaczem książek literatury faktu, psychologii i rozwoju osobistego.
+Tłumaczysz fragment rękopisu z języka angielskiego na: ${spec.name}.
+
+BEZWZGLĘDNE REGUŁY SKŁADNI PANDOC I FORMALNEJ INTEGRALNOŚCI:
+1. ZACHOWAJ 100% BEZ ZMIAN CAŁĄ SKŁADNIĘ MARKDOWN I PANDOC:
+   - Bloki klas Pandoc '::: {.nazwa_klasy}' oraz linie domykające ':::' MUSZĄ POZOSTAĆ NIENARUSZONE!
+   - Atrybuty w nagłówkach np. '{.chapter data-num="1"}' lub '{#sec-intro}' MUSZĄ pozostać dokładnie w tej samej postaci za nagłówkiem!
+   - Specjalne znaczniki w podwójnych nawiasach: '[[TOC]]', '[[PAGEBREAK]]', '[[LINES 5]]' itp. MUSZĄ pozostać bez żadnych modyfikacji.
+   - Pogrubienia '**tekst**', kursywy '*tekst*', cytaty '> cytat', listy numerowane i punktowane, tabele i separatory '---' muszą zachować identyczny układ.
+2. IMIONA I NAZWISKA:
+   - Imiona postaci: Anna, Mark, Victoria, Leo, Linda, Josh, Claire, Greg, Frank oraz pseudonim autora 'John Routefinder' POZOSTAJĄ BEZ ZMIAN (w alfabecie łacińskim lub transliterowane w standardzie danego języka).
+3. STYL I REJESTR:
+   - Zastosuj rejestr bezpośredni: ${spec.register}.
+   - Ton: szczery, surowy, konkretny, unikaj sztucznych i drewnianych sformułowań.
+4. SŁOWNIK SPÓJNOŚCI (OBOWIĄZKOWE TŁUMACZENIA KLUCZOWYCH POJĘĆ):
+${termsListing}
+5. SEKCJA COPYRIGHT:
+   - Jeśli fragment zawiera notę praw autorskich (Copyright / All rights reserved), dodaj w odpowiednim miejscu zdanie: "${copyrightClause}".
+
+ZWRÓĆ WYŁĄCZNIE PRZETŁUMACZONY TEKST MARKDOWN (bez żadnych wstępów, komentarzy tłumacza czy bloków \`\`\`markdown).`;
+
+    // ETAP 2: AGENT REDAKTOR
+    const editorSystem = `Jesteś surowym, bezkompromisowym redaktorem wydawniczym w języku ${spec.name}.
+Twoim zadaniem jest sprawdzenie i dopracowanie przetłumaczonego tekstu rękopisu.
+
+ZADANIA REDAKTORA:
+1. SPRAWDŹ SKŁADNIĘ PANDOC:
+   - Upewnij się, że każda linia '::: {.klasa}' i ':::' oraz znaczniki '[[PAGEBREAK]]', '[[TOC]]', '{.chapter...}' są zachowane co do litery.
+2. PŁYNNOŚĆ I IDIOMATYKA:
+   - Usuń kalki z angielskiego. Nadaj tekstowi naturalne, mocne brzmienie w języku docelowym w rejestrze: ${spec.register}.
+3. SPÓJNOŚĆ TERMINOLOGII:
+   - Zweryfikuj, czy użyto terminów ze słownika (${termsListing}).
+4. IMIONA:
+   - Upewnij się, że imiona (Anna, Mark, Victoria, Leo, Linda, Josh, Claire, Greg, Frank) i autor 'John Routefinder' nie zostały zniekształcone.
+
+ZWRÓĆ WYŁĄCZNIE OSTATECZNĄ, ZREDAGOWANĄ WERSJĘ MARKDOWN (bez żadnych własnych uwag, komentarzy ani otaczających znaczników kodu \`\`\`markdown).`;
+
+    try {
+      // 1. KROK 1: Agent Tłumacz (Gemini 3.8 Flash lub OpenRouter fallback)
+      const transOutcome = await callTranslatorEngine(
+        translatorSystem,
+        `FRAGMENT ${chunkIndex + 1}/${totalChunks} DO PRZETŁUMACZENIA:\n\n${chunkText}`,
+        targetLang,
+        geminiKey,
+        openRouterKeys,
+        preferredModel
+      );
+
+      const rawTranslation = transOutcome.text
+        .replace(/^```(?:markdown)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+
+      // 2. KROK 2: Agent Redaktor (Drugi model dla podwójnej kontroli jakości)
+      const orKeys = parseOpenRouterKeys(openRouterKeys);
+      let editorModel = targetLang === 'ja' || targetLang === 'zh-Hant'
+        ? 'qwen/qwen-2.5-72b-instruct'
+        : (preferredModel || 'meta-llama/llama-3.3-70b-instruct');
+
+      let finalEditedText = rawTranslation;
+      let editorProvider = 'Pominięto (brak drugiego klucza)';
+
+      if (orKeys.length > 0) {
+        try {
+          const editorMessages = [
+            { role: 'system', content: editorSystem },
+            {
+              role: 'user',
+              content: `ORYGINAŁ ANGIELSKI:\n${chunkText}\n\n---\nROBOCZE TŁUMACZENIE DO REDAKCJI:\n${rawTranslation}`
+            }
+          ];
+          const editorRes = await callOpenRouterWithRotation(orKeys, editorModel, editorMessages, 0.2);
+          finalEditedText = editorRes.text
+            .replace(/^```(?:markdown)?\s*/i, '')
+            .replace(/\s*```$/i, '')
+            .trim();
+          editorProvider = `Redaktor: OpenRouter (${editorRes.modelUsed})`;
+        } catch (editorErr: any) {
+          console.warn('[Editor Fallback] Redaktor OpenRouter zawiódł, zachowuję tłumaczenie główne:', editorErr?.message);
+          editorProvider = `Tłumacz (Redaktor pominięty: ${editorErr?.message?.slice(0, 50)})`;
+        }
+      } else {
+        editorProvider = `Tłumacz: ${transOutcome.providerLabel}`;
+      }
+
+      return res.json({
+        success: true,
+        chunkIndex,
+        totalChunks,
+        translatedText: finalEditedText,
+        translatorProvider: transOutcome.providerLabel,
+        editorProvider
+      });
+    } catch (err: any) {
+      console.error(`Błąd tłumaczenia fragmentu ${chunkIndex}:`, err);
+      return res.status(500).json({
+        success: false,
+        chunkIndex,
+        error: err?.message || String(err)
+      });
+    }
   });
 
   // GET /api/desktop-agent.py - Downloadable Reverse-WebSocket + Local HTTP Agent for real physical Windows PC control!

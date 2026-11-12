@@ -157,6 +157,14 @@ interface AppState {
   sendCouncilDeliberation: (
     userText: string
   ) => Promise<{ speakerResponse: string; deliberations: any[]; provider?: string }>;
+
+  // Klucze API (Zarządzanie kluczami dla Tłumacza i Rady)
+  customGeminiKey: string;
+  customOpenRouterKeys: string;
+  activeOpenRouterModel: string;
+  setCustomGeminiKey: (key: string) => void;
+  setCustomOpenRouterKeys: (keys: string) => void;
+  setActiveOpenRouterModel: (model: string) => void;
 }
 
 export const PERMANENT_COUNCIL_MODELS: CouncilMember[] = [
@@ -940,6 +948,34 @@ Masz 100% racji — zdiagnozowałem oba błędy i właśnie je trwale naprawiłe
         provider: 'Offline'
       };
     }
+  },
+
+  // Klucze API (localStorage)
+  customGeminiKey:
+    typeof window !== 'undefined' ? localStorage.getItem('omnistar_gemini_key') || '' : '',
+  customOpenRouterKeys:
+    typeof window !== 'undefined' ? localStorage.getItem('omnistar_openrouter_keys') || '' : '',
+  activeOpenRouterModel:
+    typeof window !== 'undefined'
+      ? localStorage.getItem('omnistar_openrouter_model') || 'anthropic/claude-3.5-sonnet'
+      : 'anthropic/claude-3.5-sonnet',
+  setCustomGeminiKey: (key: string) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('omnistar_gemini_key', key);
+    }
+    set({ customGeminiKey: key });
+  },
+  setCustomOpenRouterKeys: (keys: string) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('omnistar_openrouter_keys', keys);
+    }
+    set({ customOpenRouterKeys: keys });
+  },
+  setActiveOpenRouterModel: (model: string) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('omnistar_openrouter_model', model);
+    }
+    set({ activeOpenRouterModel: model });
   }
 }));
 

@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useStore, determineRouting, PERMANENT_COUNCIL_MODELS } from '../store';
 import { DesktopBridgePanel } from './DesktopBridgePanel';
+import { BookTranslatorPanel } from './BookTranslatorPanel';
+import { ApiKeysPanel } from './ApiKeysPanel';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Send,
@@ -23,7 +25,9 @@ import {
   Monitor,
   ArrowRight,
   Award,
-  Download
+  Download,
+  BookOpen,
+  Key
 } from 'lucide-react';
 
 declare global {
@@ -34,7 +38,7 @@ declare global {
 }
 
 export const ChatPanel = () => {
-  const [activeTab, setActiveTab] = useState<'chat' | 'desktop' | 'council' | 'config'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'desktop' | 'council' | 'translator' | 'keys' | 'config'>('chat');
   const [input, setInput] = useState('');
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [councilSubTab, setCouncilSubTab] = useState<'models' | 'board'>('models');
@@ -221,6 +225,14 @@ export const ChatPanel = () => {
     const userText = input.trim();
     setInput('');
 
+    // Kreator modeli: „dodaj nowy model”, „podłącz model” itp. otwiera okienko
+    if (/(dodaj|dodać|podłącz|podepnij|nowy|nowego).{0,25}model/i.test(userText)) {
+      addMessage({ id: uuidv4(), sender: 'user', text: userText, timestamp: Date.now() });
+      addMessage({ id: uuidv4(), sender: 'system', text: 'Otwieram kreator modeli: wybierz dostawcę, wpisz model i wklej klucz. Przetestuję go i dopiszę do rejestru.', timestamp: Date.now() });
+      window.dispatchEvent(new CustomEvent('omnistar:open-model-wizard'));
+      return;
+    }
+
     addMessage({
       id: uuidv4(),
       sender: 'user',
@@ -249,7 +261,7 @@ export const ChatPanel = () => {
   };
 
   return (
-    <div className="w-[410px] h-full bg-black/85 backdrop-blur-xl border-r border-cyan-500/30 flex flex-col text-cyan-50 shadow-[0_0_30px_rgba(0,255,255,0.1)] z-10 select-text">
+    <div className="w-full h-full bg-black/85 backdrop-blur-xl border-r border-cyan-500/30 flex flex-col text-cyan-50 shadow-[0_0_30px_rgba(0,255,255,0.1)] z-10 select-text">
       {/* Header */}
       <div className="p-3 border-b border-cyan-500/30 flex justify-between items-center bg-gradient-to-r from-cyan-950/60 to-black shrink-0">
         <div className="flex items-center gap-2">
@@ -262,7 +274,7 @@ export const ChatPanel = () => {
             </h1>
             <div className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-              Gemini 3.8 Flash Live • Zero Szablonów
+              Gemini 3.8 Flash • Tłumacz Książek Pandoc
             </div>
           </div>
         </div>
@@ -279,8 +291,8 @@ export const ChatPanel = () => {
         </div>
       </div>
 
-      {/* 4-Tab Navigation: Czat | Most PC | Rada (9) | Urządzenia */}
-      <div className="grid grid-cols-4 border-b border-cyan-900/60 bg-black/90 text-[11px] font-mono shrink-0">
+      {/* 5-Tab Navigation: Czat | Most | Rada | Tłumacz | Klucze */}
+      <div className="grid grid-cols-5 border-b border-cyan-900/60 bg-black/95 text-[11px] font-mono shrink-0">
         <button
           onClick={() => setActiveTab('chat')}
           className={`py-2 px-1 text-center font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
@@ -288,6 +300,7 @@ export const ChatPanel = () => {
               ? 'bg-cyan-950/90 text-cyan-200 border-b-2 border-cyan-400'
               : 'text-cyan-600 hover:text-cyan-300'
           }`}
+          title="Główny czat klastra i orkiestratora"
         >
           <Terminal size={12} />
           <span>Czat</span>
@@ -300,11 +313,12 @@ export const ChatPanel = () => {
               ? 'bg-cyan-950/90 text-cyan-200 border-b-2 border-emerald-400'
               : 'text-cyan-600 hover:text-cyan-300'
           }`}
+          title="Fizyczne sterowanie komputerem Windows"
         >
           <Monitor size={12} className={desktopConnected ? 'text-emerald-400' : 'text-amber-400'} />
-          <span>Most PC</span>
+          <span>Most</span>
           <span
-            className={`w-2 h-2 rounded-full ${
+            className={`w-1.5 h-1.5 rounded-full ${
               desktopConnected ? 'bg-emerald-400 shadow-[0_0_6px_#10b981]' : 'bg-amber-500'
             }`}
           />
@@ -317,23 +331,52 @@ export const ChatPanel = () => {
               ? 'bg-amber-950/80 text-amber-200 border-b-2 border-amber-400'
               : 'text-amber-500/80 hover:text-amber-300'
           }`}
+          title="Rada 9 Modeli AI"
         >
           <Award size={12} />
-          <span>Rada (9)</span>
+          <span>Rada</span>
         </button>
 
         <button
-          onClick={() => setActiveTab('config')}
+          onClick={() => setActiveTab('translator')}
           className={`py-2 px-1 text-center font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
-            activeTab === 'config'
+            activeTab === 'translator'
+              ? 'bg-emerald-950/90 text-emerald-200 border-b-2 border-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.3)]'
+              : 'text-emerald-500 hover:text-emerald-300'
+          }`}
+          title="Tłumacz Książek Pandoc Markdown"
+        >
+          <BookOpen size={12} />
+          <span>Tłumacz</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('keys')}
+          className={`py-2 px-1 text-center font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
+            activeTab === 'keys'
               ? 'bg-cyan-950/90 text-cyan-200 border-b-2 border-cyan-400'
               : 'text-cyan-600 hover:text-cyan-300'
           }`}
+          title="Zarządzanie kluczami API (Gemini, OpenRouter z rotacją 429)"
         >
-          <ShieldCheck size={12} />
-          <span>System</span>
+          <Key size={12} />
+          <span>Klucze</span>
         </button>
       </div>
+
+      {/* VIEW: TŁUMACZ KSIĄŻEK */}
+      {activeTab === 'translator' && (
+        <div className="flex-1 overflow-hidden flex flex-col">
+          <BookTranslatorPanel onNavigateToKeys={() => setActiveTab('keys')} />
+        </div>
+      )}
+
+      {/* VIEW: KLUCZE API */}
+      {activeTab === 'keys' && (
+        <div className="flex-1 overflow-hidden flex flex-col">
+          <ApiKeysPanel />
+        </div>
+      )}
 
       {/* VIEW: MOST PULPITU */}
       {activeTab === 'desktop' && (
